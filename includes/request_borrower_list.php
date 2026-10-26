@@ -1,6 +1,7 @@
 <?php
 
 /** Staff worklist: one selection across a borrower's matching submissions. */
+/** @var array<int, array{member: array, transactions: array}> $requestGroups Provided by request_transactions_view.php. */
 foreach ($requestGroups as $borrowerId => $group):
     $person = $group['member'];
     $txIds = array_map('intval', array_column($group['transactions'], 'TransactionID'));
