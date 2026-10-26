@@ -1,0 +1,71 @@
+-- TEST-ONLY schema, reconstructed from the application's SQL (the original dump was not in the upload).
+-- Used by tests/workflow_test.php to verify the app against a throwaway database.
+SET FOREIGN_KEY_CHECKS=0;
+CREATE TABLE role (RoleID INT AUTO_INCREMENT PRIMARY KEY, RoleName VARCHAR(50) NOT NULL UNIQUE, IsArchived TINYINT(1) NOT NULL DEFAULT 0);
+CREATE TABLE user_account (
+  UserID INT AUTO_INCREMENT PRIMARY KEY, RoleID INT NULL, FirstName VARCHAR(80) NOT NULL, LastName VARCHAR(80) NOT NULL,
+  Email VARCHAR(150) UNIQUE, Phone VARCHAR(40), Address VARCHAR(255), Username VARCHAR(100) NOT NULL UNIQUE,
+  PasswordHash VARCHAR(255) NOT NULL, RegistrationDate DATE, MembershipStatus ENUM('Active','Inactive','Expired') NOT NULL DEFAULT 'Active',
+  VerificationStatus ENUM('Pending','Approved','Rejected') NOT NULL DEFAULT 'Approved', MembershipNumber VARCHAR(30),
+  IsActive TINYINT(1) NOT NULL DEFAULT 1, LastLogin DATETIME NULL,
+  FOREIGN KEY (RoleID) REFERENCES role(RoleID));
+CREATE TABLE section (SectionID INT AUTO_INCREMENT PRIMARY KEY, SectionName VARCHAR(100) NOT NULL, Description VARCHAR(255), IsArchived TINYINT(1) NOT NULL DEFAULT 0);
+CREATE TABLE shelf (ShelfID INT AUTO_INCREMENT PRIMARY KEY, SectionID INT NOT NULL, ShelfCode VARCHAR(30) NOT NULL, ShelfDescription VARCHAR(255), IsArchived TINYINT(1) NOT NULL DEFAULT 0, FOREIGN KEY (SectionID) REFERENCES section(SectionID));
+CREATE TABLE category (CategoryID INT AUTO_INCREMENT PRIMARY KEY, CategoryName VARCHAR(100) NOT NULL, IsArchived TINYINT(1) NOT NULL DEFAULT 0);
+CREATE TABLE publisher (PublisherID INT AUTO_INCREMENT PRIMARY KEY, PublisherName VARCHAR(150) NOT NULL, IsArchived TINYINT(1) NOT NULL DEFAULT 0);
+CREATE TABLE author (AuthorID INT AUTO_INCREMENT PRIMARY KEY, FirstName VARCHAR(80), LastName VARCHAR(80), IsArchived TINYINT(1) NOT NULL DEFAULT 0);
+CREATE TABLE donor (DonorID INT AUTO_INCREMENT PRIMARY KEY, DonorName VARCHAR(150), DonorType VARCHAR(50), ContactInfo VARCHAR(255), IsArchived TINYINT(1) NOT NULL DEFAULT 0);
+CREATE TABLE policy (PolicyID INT AUTO_INCREMENT PRIMARY KEY, PolicyName VARCHAR(100) NOT NULL, Description VARCHAR(255), IsBorrowable TINYINT(1) NOT NULL DEFAULT 1,
+  LoanDays INT NOT NULL DEFAULT 14, MaxRenewals INT NOT NULL DEFAULT 0, PenaltyRate DECIMAL(10,2) NOT NULL DEFAULT 0,
+  WalkInMaxBooks INT NOT NULL DEFAULT 100, MemberMaxBooks INT NOT NULL DEFAULT 3, IsArchived TINYINT(1) NOT NULL DEFAULT 0);
+CREATE TABLE book (BookID INT AUTO_INCREMENT PRIMARY KEY, ISBN VARCHAR(20), CallNumber VARCHAR(50), Edition VARCHAR(50), Language VARCHAR(30), Pages INT,
+  Description TEXT, Title VARCHAR(255) NOT NULL, PublicationYear INT, PublisherID INT, SectionID INT, CategoryID INT, PolicyID INT,
+  AcquisitionCost DECIMAL(10,2), AcquisitionType VARCHAR(30), AcquisitionDate DATE, DonorID INT NULL, IsArchived TINYINT(1) NOT NULL DEFAULT 0,
+  FOREIGN KEY (PublisherID) REFERENCES publisher(PublisherID), FOREIGN KEY (SectionID) REFERENCES section(SectionID),
+  FOREIGN KEY (CategoryID) REFERENCES category(CategoryID), FOREIGN KEY (PolicyID) REFERENCES policy(PolicyID));
+CREATE TABLE book_author (BookID INT NOT NULL, AuthorID INT NOT NULL, PRIMARY KEY (BookID, AuthorID), FOREIGN KEY (BookID) REFERENCES book(BookID), FOREIGN KEY (AuthorID) REFERENCES author(AuthorID));
+CREATE TABLE book_copy (CopyID INT AUTO_INCREMENT PRIMARY KEY, BookID INT NOT NULL, AccessionNumber VARCHAR(40) NOT NULL UNIQUE, ShelfID INT NULL, DonorID INT NULL,
+  Status ENUM('Available','Reserved','Borrowed','In Use','Lost','Damaged','Withdrawn','Donated') NOT NULL DEFAULT 'Available', IsArchived TINYINT(1) NOT NULL DEFAULT 0,
+  FOREIGN KEY (BookID) REFERENCES book(BookID));
+CREATE TABLE loan_request (RequestID INT AUTO_INCREMENT PRIMARY KEY, UserID INT NOT NULL, RequestType ENUM('Loan','Reservation') NOT NULL DEFAULT 'Loan',
+  RequestDate DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, ApprovalStatus ENUM('Pending','Approved','Rejected','Fulfilled','Expired','Cancelled') NOT NULL DEFAULT 'Pending',
+  ApprovedByUserID INT NULL, ApprovalDate DATETIME NULL, AssignedCopyID INT NULL, ExpiresAt DATETIME NULL, NotifiedAt DATETIME NULL,
+  FOREIGN KEY (UserID) REFERENCES user_account(UserID), FOREIGN KEY (ApprovedByUserID) REFERENCES user_account(UserID), FOREIGN KEY (AssignedCopyID) REFERENCES book_copy(CopyID));
+CREATE TABLE loan_request_detail (RequestID INT NOT NULL, BookID INT NOT NULL, PRIMARY KEY (RequestID, BookID),
+  FOREIGN KEY (RequestID) REFERENCES loan_request(RequestID) ON DELETE CASCADE, FOREIGN KEY (BookID) REFERENCES book(BookID));
+CREATE TABLE loan (LoanID INT AUTO_INCREMENT PRIMARY KEY, BorrowerUserID INT NOT NULL, ProcessedByUserID INT NOT NULL, RequestID INT NULL,
+  LoanDate DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (BorrowerUserID) REFERENCES user_account(UserID), FOREIGN KEY (ProcessedByUserID) REFERENCES user_account(UserID), FOREIGN KEY (RequestID) REFERENCES loan_request(RequestID));
+CREATE TABLE loan_detail (LoanDetailID INT AUTO_INCREMENT PRIMARY KEY, LoanID INT NOT NULL, CopyID INT NOT NULL, DueDate DATE NOT NULL, BookCondition VARCHAR(20) DEFAULT 'Good',
+  FOREIGN KEY (LoanID) REFERENCES loan(LoanID), FOREIGN KEY (CopyID) REFERENCES book_copy(CopyID));
+CREATE TABLE return_header (ReturnID INT AUTO_INCREMENT PRIMARY KEY, LoanID INT NOT NULL, ProcessedByUserID INT NOT NULL, ReturnStatus ENUM('Partial','Complete') NOT NULL DEFAULT 'Partial',
+  FOREIGN KEY (LoanID) REFERENCES loan(LoanID));
+CREATE TABLE return_detail (ReturnDetailID INT AUTO_INCREMENT PRIMARY KEY, ReturnID INT NOT NULL, LoanDetailID INT NOT NULL, ReturnDate DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ReturnCondition VARCHAR(20), ReturnStatus VARCHAR(20) DEFAULT 'Returned',
+  FOREIGN KEY (ReturnID) REFERENCES return_header(ReturnID), FOREIGN KEY (LoanDetailID) REFERENCES loan_detail(LoanDetailID));
+CREATE TABLE fine (FineID INT AUTO_INCREMENT PRIMARY KEY, LoanDetailID INT NOT NULL, PolicyID INT NULL, FineAmount DECIMAL(10,2) NOT NULL, Reason VARCHAR(255),
+  FineDate DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PaymentStatus ENUM('Unpaid','Paid') NOT NULL DEFAULT 'Unpaid', FOREIGN KEY (LoanDetailID) REFERENCES loan_detail(LoanDetailID));
+CREATE TABLE payment (PaymentID INT AUTO_INCREMENT PRIMARY KEY, FineID INT NOT NULL, PaidAmount DECIMAL(10,2) NOT NULL, PaymentDate DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PaymentMethod VARCHAR(30), FOREIGN KEY (FineID) REFERENCES fine(FineID));
+CREATE TABLE in_library_use (InLibraryUseID INT AUTO_INCREMENT PRIMARY KEY, CopyID INT NOT NULL, MemberID INT NULL, WalkInName VARCHAR(150), WalkInContact VARCHAR(100),
+  BorrowerType ENUM('Member','Walk-in') NOT NULL, UserID INT NULL, StartTime DATETIME NOT NULL, ReturnTime DATETIME NULL, ReturnedByUserID INT NULL,
+  Status ENUM('Active','Returned') NOT NULL DEFAULT 'Active', Remarks VARCHAR(255), FOREIGN KEY (CopyID) REFERENCES book_copy(CopyID));
+CREATE TABLE activity_log (ActivityLogID INT AUTO_INCREMENT PRIMARY KEY, UserID INT NULL, ActionType VARCHAR(50), Module VARCHAR(50), Description VARCHAR(500), RecordID INT NULL, CreatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+SET FOREIGN_KEY_CHECKS=1;
+
+-- seed
+INSERT INTO role (RoleName) VALUES ('Admin'),('Librarian'),('Assistant'),('Member');
+INSERT INTO section (SectionName) VALUES ('Computer'),('Fiction');
+INSERT INTO category (CategoryName) VALUES ('Information Technology'),('Fiction');
+INSERT INTO publisher (PublisherName) VALUES ('O''Reilly Media');
+INSERT INTO policy (PolicyName, IsBorrowable, LoanDays, PenaltyRate) VALUES ('Standard Circulation',1,14,5.00),('Reference Only',0,0,0);
+INSERT INTO author (FirstName, LastName) VALUES ('Robert','Martin');
+INSERT INTO book (Title, ISBN, PublisherID, SectionID, CategoryID, PolicyID, AcquisitionCost, PublicationYear) VALUES
+ ('Clean Code','9780132350884',1,1,1,1,500,2008),('Refactoring','9780134757599',1,1,1,1,400,2018),('Encyclopedia',NULL,1,1,1,2,900,2000);
+INSERT INTO book_author VALUES (1,1);
+INSERT INTO book_copy (BookID, AccessionNumber) VALUES (1,'BK-00001-01'),(1,'BK-00001-02'),(2,'BK-00002-01'),(3,'BK-00003-01');
+-- password for all test accounts: Passw0rd!
+INSERT INTO user_account (RoleID, FirstName, LastName, Email, Username, PasswordHash, RegistrationDate, MembershipNumber) VALUES
+ (1,'Ada','Admin','admin@library.local','admin@library.local','$2y$10$Sr9WkFq1y2w5Zk0aYjQ2UeLz3p1Gm7s8bYb0QnV4m6B0h5d6o7z3S',CURDATE(),NULL),
+ (4,'Mia','Member','mia@school.local','mia','$2y$10$Sr9WkFq1y2w5Zk0aYjQ2UeLz3p1Gm7s8bYb0QnV4m6B0h5d6o7z3S',CURDATE(),'LIB-2026-00002'),
+ (4,'Ben','Borrower','ben@school.local','ben','$2y$10$Sr9WkFq1y2w5Zk0aYjQ2UeLz3p1Gm7s8bYb0QnV4m6B0h5d6o7z3S',CURDATE(),'LIB-2026-00003'),
+ (4,'Cy','Third','cy@school.local','cy','$2y$10$Sr9WkFq1y2w5Zk0aYjQ2UeLz3p1Gm7s8bYb0QnV4m6B0h5d6o7z3S',CURDATE(),'LIB-2026-00004');

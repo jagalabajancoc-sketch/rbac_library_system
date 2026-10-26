@@ -1,0 +1,2 @@
+ALTER TABLE payment
+  ADD COLUMN IF NOT EXISTS PaymentReference VARCHAR(100) NULL AFTER PaymentMethod;

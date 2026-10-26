@@ -1,0 +1,11 @@
+# Local state and exported records must not be committed.
+.env
+.env.*
+!.env.example
+database-backups/
+database/library_management.sql
+*.sql.sha256
+tests/*-fixture.json
+*.log
+
+tests/*-fixture.json

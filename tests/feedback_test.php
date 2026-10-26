@@ -1,0 +1,92 @@
+<?php
+require __DIR__.'/guard.php';
+require __DIR__.'/../includes/functions.php';
+$passes=0;
+function check(bool $value,string $message):void{global $passes;if(!$value)throw new RuntimeException('FAIL '.$message);$passes++;echo 'PASS '.$message.PHP_EOL;}
+function rejects(callable $fn):bool{try{$fn();return false;}catch(LibraryException $e){return true;}}
+$prefix='FB-'.bin2hex(random_bytes(4));
+$admin=(int)fetch_value("SELECT u.UserID FROM user_account u JOIN role r ON r.RoleID=u.RoleID WHERE r.RoleName='Admin' LIMIT 1");
+$role=(int)fetch_value("SELECT RoleID FROM role WHERE RoleName='Member'");
+$members=[];
+foreach(['A','B','C','D','E'] as $name){run("INSERT INTO user_account (RoleID,FirstName,LastName,Username,Email,PasswordHash,MembershipNumber,RegistrationDate,MembershipStatus,VerificationStatus) VALUES (?,'Feedback',?,?,?,?,?,CURDATE(),'Active','Approved')",[$role,$name,$prefix.$name,$prefix.$name.'@example.test',password_hash('Feedback-Test-Only!',PASSWORD_DEFAULT),$prefix.$name]);$members[$name]=(int)last_id();}
+run("INSERT INTO policy (PolicyName,IsBorrowable,LoanDays,PenaltyRate,MemberMaxBooks) VALUES (?,1,7,5,3)",[$prefix]);$policy=(int)last_id();
+$section=(int)fetch_value('SELECT SectionID FROM section LIMIT 1');$category=(int)fetch_value('SELECT CategoryID FROM category LIMIT 1');$publisher=(int)fetch_value('SELECT PublisherID FROM publisher LIMIT 1');
+$books=[];
+for($i=0;$i<7;$i++) {run('INSERT INTO book (Title,PolicyID,SectionID,CategoryID,PublisherID,AcquisitionCost) VALUES (?,?,?,?,?,100)',[$prefix.' Title '.$i,$policy,$section,$category,$publisher]);$books[]=(int)last_id();create_entered_copies($books[$i],2,$prefix."-$i-1\n".$prefix."-$i-2");}
+check((int)fetch_value('SELECT COUNT(*) FROM book_copy WHERE BookID=?',[$books[0]])===2,'staff-entered accession numbers create the requested copies');
+check(rejects(fn()=>create_entered_copies($books[0],2,"DUP\nDUP")),'duplicate accession numbers in one batch are rejected');
+check(rejects(fn()=>create_entered_copies($books[0],2,$prefix."-new\n".$prefix.'-0-1')),'existing accession numbers reject the whole copy batch');
+check(!fetch_value('SELECT CopyID FROM book_copy WHERE AccessionNumber=?',[$prefix.'-new']),'failed accession batch leaves no partial copies');
+$token=bin2hex(random_bytes(32));$tx=create_request_transaction($members['A'],[$books[0],$books[1]],$token);$ids=array_column($tx['items'],'id');
+check(count($ids)===2 && (int)fetch_value('SELECT COUNT(*) FROM borrow_request WHERE TransactionID=?',[$tx['transaction_id']])===2,'one submitted transaction contains both request items');
+check(create_request_transaction($members['A'],[$books[0],$books[1]],$token)['transaction_id']===$tx['transaction_id'],'resubmitting a basket reuses the transaction');
+check(rejects(fn()=>create_request_transaction($members['A'],[$books[2]],$token)),'submission token cannot be reused for a different basket');
+$before=(int)fetch_value('SELECT COUNT(*) FROM request_transaction');
+check(rejects(fn()=>create_request_transaction($members['A'],[$books[2],$books[3]])),'pending requests count toward the basket borrowing limit');
+check((int)fetch_value('SELECT COUNT(*) FROM request_transaction')===$before,'over-limit submission leaves no empty header');
+check(rejects(fn()=>create_request_transaction($members['A'],[$books[2],$books[0]])),'a duplicate open title rolls back the complete basket');
+check(!has_open_request_for_book($members['A'],$books[2]),'valid book in failed basket is not submitted separately');
+$res=decide_request_items($ids,'approve',$admin,true,'',null,$tx['transaction_id']);
+check($res['count']===2,'both selected books can be approved together');
+$released=release_request_items($ids,$admin,$tx['transaction_id']);$loan=$released['loan_id'];
+check((int)fetch_value('SELECT COUNT(*) FROM loan_detail WHERE LoanID=?',[$loan])===2,'one release creates one loan header with two details');
+check(release_request_items($ids,$admin,$tx['transaction_id'])['loan_id']===$loan,'repeated release returns the same loan');
+check((int)fetch_value('SELECT COUNT(*) FROM borrow_request WHERE ReleasedLoanID=?',[$loan])===2,'both request items link to the shared loan');
+$details=array_map('intval',array_column(fetch_all('SELECT LoanDetailID FROM loan_detail WHERE LoanID=? ORDER BY LoanDetailID',[$loan]),'LoanDetailID'));
+run('UPDATE loan_detail SET DueDate=DATE_SUB(CURDATE(),INTERVAL 2 DAY) WHERE LoanDetailID=?',[$details[0]]);
+$quote=circulation_transaction(fn()=>return_quote([$details[0]=>'Damaged']));
+check($quote['total']===60.0,'return quote combines overdue and damage penalties');
+check(!fetch_value('SELECT FineID FROM fine WHERE LoanDetailID=?',[$details[0]]),'reviewing a return does not assess fines early');
+$ret=process_return_transaction([$details[0]=>'Damaged'],$admin);
+check($ret['fine_total']===60.0 && fetch_value('SELECT ReturnStatus FROM return_header WHERE ReturnBatchID=?',[$ret['batch_id']])==='Partial','partial return saves assessed penalties and retains outstanding books');
+check(rejects(fn()=>process_return_transaction([$details[0]=>'Damaged'],$admin)),'duplicate return cannot assess fines twice');
+check((int)fetch_value('SELECT COUNT(*) FROM fine WHERE LoanDetailID=?',[$details[0]])===2,'one overdue charge and one damage charge remain');
+$next=process_return_transaction([$details[1]=>'Good'],$admin);
+check(fetch_value('SELECT ReturnStatus FROM return_header WHERE ReturnBatchID=?',[$next['batch_id']])==='Complete','last outstanding book completes the return');
+// One shelf copy remains; everyone requesting this title must queue.
+run("UPDATE book_copy SET Status='Withdrawn' WHERE BookID=? ORDER BY CopyID LIMIT 1",[$books[2]]);
+$b=create_borrow_request($members['B'],$books[2]);$c=create_borrow_request($members['C'],$books[2]);
+check($b['type']==='Reservation' && $b['position']===1 && $c['position']===2,'two members reserving the same title receive stable queue positions');
+create_entered_copies($books[2],1,$prefix.'-queue-spare');
+$copy=(int)fetch_value("SELECT CopyID FROM book_copy WHERE BookID=? AND Status='Available' ORDER BY CopyID LIMIT 1",[$books[2]]);
+check(rejects(fn()=>approve_borrow_request($c['id'],$copy,$admin)),'manual approval cannot skip an earlier eligible reservation');
+check(promote_reservation_queue($books[2])===1 && fetch_value('SELECT ApprovalStatus FROM borrow_request WHERE RequestID=?',[$b['id']])==='Approved','available copy is held for the first member only');
+check(rejects(fn()=>decide_request_items([$b['id']],'cancel',$members['C'],false)),'members cannot cancel another member\'s reservation');
+cancel_borrow_request($b['id'],$members['B'],false);
+check(fetch_value('SELECT ApprovalStatus FROM borrow_request WHERE RequestID=?',[$c['id']])==='Approved','cancelling a held request promotes the next reservation');
+$late=create_borrow_request($members['D'],$books[2]);
+run('UPDATE borrow_request SET ExpiresAt=DATE_SUB(NOW(),INTERVAL 1 MINUTE) WHERE RequestID=?',[$c['id']]);
+check(rejects(fn()=>release_request_items([$c['id']],$admin)),'expired hold cannot be released');
+expire_hold($c['id']);
+check(fetch_value('SELECT ApprovalStatus FROM borrow_request WHERE RequestID=?',[$late['id']])==='Approved','expired hold passes to the next eligible member');
+$lim=create_request_transaction($members['E'],[$books[3],$books[4],$books[5]]);
+check(rejects(fn()=>create_borrow_request($members['E'],$books[2])),'reservation cannot exceed the member limit');
+$spare=(int)fetch_value("SELECT CopyID FROM book_copy WHERE BookID=? AND Status='Available' LIMIT 1",[$books[6]]);
+check(rejects(fn()=>issue_desk_loan($members['E'],[$spare],$admin)),'desk checkout cannot bypass reserved request slots');
+check(rejects(fn()=>use_request_create($members['E'],[['copy_id'=>$spare,'use'=>'Borrow']],'Desk',$admin)),'kiosk/desk request cannot bypass reserved request slots');
+// Failed multi-item approval must undo earlier holds.
+$limIds=array_column($lim['items'],'id');run("UPDATE book_copy SET Status='Withdrawn' WHERE BookID=?",[$books[4]]);
+check(rejects(fn()=>decide_request_items($limIds,'approve',$admin,true)),'unavailable book fails a multi-book approval as a whole');
+check(fetch_value('SELECT ApprovalStatus FROM borrow_request WHERE RequestID=?',[$limIds[0]])==='Pending','failed approval leaves earlier selected books pending');
+check(rejects(fn()=>decide_request_items([$limIds[0],$late['id']],'cancel',$admin,true)),'items from unrelated transactions cannot be combined for decisions');
+check(rejects(fn()=>decide_request_items($limIds,'reject',$admin,true,'')),'bulk rejection requires a reason');
+$cancel=decide_request_items([$limIds[0],$limIds[1]],'cancel',$members['E'],false);
+check($cancel['count']===2 && count_open_request_books($members['E'])===1,'selected cancellations free only the selected request slots');
+$kioskCopies=[];foreach([$books[1],$books[6]] as $bid)$kioskCopies[]=['copy_id'=>(int)fetch_value("SELECT CopyID FROM book_copy WHERE BookID=? AND Status='Available' LIMIT 1",[$bid]),'use'=>'Borrow'];
+$kiosk=use_request_create($members['E'],$kioskCopies,'Desk',$admin);
+check(count_open_request_books($members['E'])===3,'pending kiosk items and catalog reservations share the same limit');
+check(rejects(fn()=>create_borrow_request($members['E'],$books[2])),'catalog reservations cannot bypass pending kiosk slots');
+$decisions=[];foreach(fetch_all('SELECT ItemID FROM use_request_item WHERE UseRequestID=?',[$kiosk])as $item)$decisions[$item['ItemID']]=['do'=>'approve','as'=>'Borrow'];
+$issued=use_request_decide($kiosk,$decisions,$admin);
+check($issued['borrowed']===2 && count_open_request_books($members['E'])===1,'approving kiosk books replaces their pending slots with actual loans');
+$conditions=[];foreach(fetch_all('SELECT LoanDetailID FROM loan_detail WHERE LoanID=?',[$issued['loan_id']])as $d)$conditions[$d['LoanDetailID']]='Good';process_return_transaction($conditions,$admin);
+// Same borrower may return items from two loans under one return receipt.
+create_entered_copies($books[0],1,$prefix.'-replacement');
+$a1=create_borrow_request($members['B'],$books[0]);$a2=create_borrow_request($members['B'],$books[1]);
+decide_request_items([$a1['id']],'approve',$admin,true);decide_request_items([$a2['id']],'approve',$admin,true);
+$l1=release_request_items([$a1['id']],$admin);$l2=release_request_items([$a2['id']],$admin);
+$d1=(int)fetch_value('SELECT LoanDetailID FROM loan_detail WHERE LoanID=?',[$l1['loan_id']]);$d2=(int)fetch_value('SELECT LoanDetailID FROM loan_detail WHERE LoanID=?',[$l2['loan_id']]);
+$both=process_return_transaction([$d1=>'Good',$d2=>'Good'],$admin);
+check($both['loans']===2 && (int)fetch_value('SELECT COUNT(*) FROM return_header WHERE ReturnBatchID=?',[$both['batch_id']])===2,'multi-loan return has one batch header and linked per-loan details');
+echo "$passes feedback checks passed.\n";
+file_put_contents(__DIR__.'/feedback-fixture.json',json_encode(['prefix'=>$prefix,'members'=>$members,'admin'=>$admin,'books'=>$books,'transaction'=>$tx['transaction_id']]));

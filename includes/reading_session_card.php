@@ -1,0 +1,7 @@
+<?php /* $readingCard is a reading_context result. */
+$c=$readingCard;$liveBooks=array_values(array_filter($c['rows'],fn($r)=>$r['Status']==='Active'));
+$url='reading_session.php?'.http_build_query(['key'=>$c['key'],'return_to'=>$readingOrigin,'return_query'=>http_build_query(array_filter(array_intersect_key($_GET,array_flip(['q','book','type','page','tab'])),fn($v)=>is_scalar($v)))]);?>
+<article class="rs-card"><div class="rs-card-header"><div><h3 class="h6 mb-1"><?=h($c['who'])?></h3><small><?=h($c['card'])?> · <?=h($c['ref']?:'Reading record')?></small></div><span class="rs-state"><?=$c['form']?'ID storage slot '.h($c['form']['IdSlot']):'No stored ID'?></span></div>
+<?php if($liveBooks):?><ul><?php foreach(array_slice($liveBooks,0,3)as$item):?><li><strong><?=h($item['Title'])?></strong> <small><?=h($item['AccessionNumber'])?></small></li><?php endforeach;?><?php if(count($liveBooks)>3):?><li class="text-muted">+ <?=count($liveBooks)-3?> more books</li><?php endif;?></ul><?php else:?><p class="small text-success mt-3 mb-2">All books returned — ready to give the ID back.</p><?php endif;?>
+<?php if($c['form']&&desk_closing_ts($c['form']['IssuedAt'])<time()):?><p class="small text-danger mb-2">Past closing · ID still in custody</p><?php endif;?>
+<div class="rs-card-footer"><small><?=count($liveBooks)?> currently reading · <?=count($c['rows'])-count($liveBooks)?> returned</small><a class="btn btn-sm btn-primary" data-reading-session href="<?=h($url)?>">Manage session</a></div></article>
