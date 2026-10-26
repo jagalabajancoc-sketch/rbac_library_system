@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Audit trail. Records who did what, for staff AND member actions
  * (e.g. a member submitting or cancelling a Borrow Request).
@@ -22,5 +23,6 @@ function log_activity(string $actionType, string $module, string $description, $
                 $recordId !== null ? (int)$recordId : null,
             ]
         );
-    } catch (Throwable $e) { /* logging must never break the app */ }
+    } catch (Throwable $e) { /* logging must never break the app */
+    }
 }
